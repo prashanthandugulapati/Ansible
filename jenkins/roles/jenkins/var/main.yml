@@ -1,0 +1,8 @@
+---
+
+jenkins:
+  redhat:
+    dependencies:
+      - 'java'
+      - 'git'
+      - 'curl'
