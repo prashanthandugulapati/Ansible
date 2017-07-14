@@ -1,0 +1,169 @@
+---
+
+- name: Announce who we are as a regular user
+  shell: whoami
+  register: CURRENT_USER
+
+- debug:
+    msg: "Current user name is {{ CURRENT_USER.stdout_lines }}"
+
+- name: Verify cicd filesystem
+  file: 
+    path: /opt/CICD
+    owner: jenkins
+    group: users
+    state: directory
+    mode: 0775
+  
+- name: Verify cicd-assets directory
+  file: 
+    path: /opt/CICD/cicd-assets
+    owner: jenkins
+    group: users
+    state: directory
+    mode: 0775
+
+- name: Verify cicd-assets softlink
+  file: 
+    src: /opt/CICD/cicd-assets
+    dest: /var/lib/cicd-assets
+    owner: jenkins
+    group: users
+    state: link
+
+- name: Verify jenkins user home directory
+  file: 
+    path: /opt/CICD/home-Jenkins
+    owner: jenkins
+    group: users
+    state: directory
+    mode: 0775
+
+- name: Python is installed
+  yum: name=python-pycurl state=installed
+
+- name: Install RedHat dependencies
+  yum: name={{ item }} state=installed
+  with_items: "{{ jenkins.redhat.dependencies }}"
+
+- name: Import jenkins key
+  rpm_key:
+    key: https://jenkins-ci.org/redhat/jenkins-ci.org.key
+    state: present
+    validate_certs: no
+
+- name: Get jenkins repo for ansible
+  get_url:
+    url: http://pkg.jenkins-ci.org/redhat/jenkins.repo
+    dest: /etc/yum.repos.d/jenkins.repo
+
+- name: Install Jenkins
+  yum: name=jenkins state=latest
+  
+# ensuring that the jenkins is up in running
+- name: Ensure jenkins is running.
+  service:
+    name: jenkins
+    state: started
+
+# JRM - Not sure this is how we want to do plugins... Script can fail and will not report (I think)
+- name: Copying the file plugin.sh for plugin installation
+  copy: src=roles/jenkins/scripts/plugin.sh dest=/tmp/plugin.sh mode=0777
+
+- name: Installing listed plugins
+  command: "sh /tmp/plugin.sh github git ldap ant maven gradle matrix-auth"
+  
+- name: checking existence of ca certs
+  command: keytool -list -keystore /usr/java/jdk1.8.0_74/jre/lib/security/cacerts -storepass changeit -noprompt -alias "CA1_Issuing"
+  register: result
+  ignore_errors: yes
+  
+- name: copy ca cert to cicdassets
+  copy: src=roles/jenkins/certs/IssuingCA1.cer dest=/opt/CICD/cicd-assets
+  when: result.stdout.find('not') != -1
+
+# JRM - Need to make sure that this is the *right* java home...
+- name: Installing ca cert
+  command: keytool -import -keystore /usr/lib/jvm/jre-1.8.0-ibm.x86_64/lib/security/cacerts -storepass changeit -noprompt -alias "NMCA1_Issuing" -file /opt/CICD/cicd-assets/IssuingCA1.cer
+  when: result.stdout.find('not') != -1
+
+#configuring the ldap configuartion to make it secure
+- name: copying the file configldap.xml
+  copy: src=configldap.xml dest=/var/lib/jenkins/config.xml owner=jenkins group=jenkins
+
+# Adding the intialAdmin password 
+- name: skips the IntialAdminPassword Step and installing plugin
+  copy: src=jenkins.install.InstallUtil.lastExecVersion dest=/var/lib/jenkins/jenkins.install.InstallUtil.lastExecVersion owner=jenkins group=jenkins
+
+# Adding key certs for 
+- name: copying the certs for nexus
+  command: keytool -import -trustcacerts -keystore /usr/lib/jvm/jre-1.8.0-ibm.x86_64/lib/security/cacerts -storepass changeit -noprompt -alias "nexus.cer" -file roles/jenkins/templates/nexus.cer 
+  ignore_errors: yes
+ 
+- name: copying the certs for nexus
+  command: keytool -import -trustcacerts -keystore /usr/lib/jvm/jre-1.8.0-ibm.x86_64/lib/security/cacerts -storepass changeit -noprompt -alias "nexus.com.cer" -file roles/jenkins/templates/nexus.com.cer
+  ignore_errors: yes
+
+# Installing the java 7 which its getting from nexus
+- name: Installation of java7 from Nexus repo 
+  yum:
+    name:  https://nexus.com/repository/javaversion/jdk-7u45-linux-x64.rpm
+    state: present 
+    validate_certs: no
+
+# Getting the ant from nexus and extrating into jenkins and placing at /var/lib/cicd-assets
+- name: Extracting the ant form nexus and installing into jenkins
+  unarchive:
+    src:  https://nexus.com/repository/javaversion/apache-ant-1.10.0-bin.tar.gz
+    dest: /var/lib/cicd-assets
+    remote_src: True
+    validate_certs: no
+    owner: jenkins
+    group: jenkins
+
+# Getting the Maven from nexus and extrating into jenkins and placing at /var/lib/cicd-assets
+- name: Extracting the Maven form nexus and installing into jenkins
+  unarchive:
+    src:  https://nexus.com/repository/javaversion/apache-maven-3.3.9-bin.tar.gz
+    dest: /var/lib/cicd-assets
+    remote_src: True
+    validate_certs: no
+    owner: jenkins
+    group: jenkins
+
+# Getting the gradle from nexus and extrating into jenkins and placing at /var/lib/cicd-assets
+- name: Extracting the gradle for nexus and installing into jenkins
+  unarchive:
+    src:  https://nexus.com/repository/javaversion/gradle-3.2.1-all.zip
+    dest: /var/lib/cicd-assets
+    remote_src: True
+    validate_certs: no
+# Copying .xml for ant into /var/lib/jenkins/   
+    owner: jenkins
+    group: jenkins
+    
+- name: copying configuration files for ANT
+  template: src=hudson.tasks.Ant.xml  dest=/var/lib/jenkins/hudson.tasks.Ant.xml  owner=jenkins group=jenkins
+
+# Copying files .xml for  into /var/lib/jenkins/
+- name: copying configuration files from Gradle
+  template: src=hudson.plugins.gradle.Gradle.xml  dest=/var/lib/jenkins/hudson.plugins.gradle.Gradle.xml  owner=jenkins group=jenkins
+
+# Copying .xml for maven into /var/lib/jenkins/
+- name: copying configuration files Maven
+  template: src=hudson.tasks.Maven.xml  dest=/var/lib/jenkins/hudson.tasks.Maven.xml  owner=jenkins group=jenkins
+  
+# Picking up the backup script and placing into /var/lib/jenkins-backup.sh
+- name: jenkins backing up
+  template: src=jenkins-backup.sh  dest=/var/lib/cicd-assets/jenkins-backup.sh  owner=jenkins group=jenkins  mode=0777
+
+# Below cronjob is scheduled for everyday at 8:05pm at executes the jenkins-backup.sh
+- name: configuring the cronjob
+  cron: minute=05 hour=20 job="/var/lib/cicd-assets/jenkins-backup.sh >> /var/lib/cicd-assets/jenkins.out 2>&1"
+
+# Making sure that jenkins is restarted
+- name: ensure jenkins is running
+  service:
+    name: jenkins
+    state: restarted
+
